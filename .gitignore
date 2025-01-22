@@ -1,0 +1,5 @@
+.settings.php
+.idea/
+.vscode/
+vendor/
+*.log

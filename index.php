@@ -1,0 +1,208 @@
+<?php
+require_once(__DIR__ . '/.settings.php');
+
+// Проверка входящего запроса от Битрикс24
+$request = $_REQUEST;
+$auth = array();
+
+if (isset($request["DOMAIN"]) && isset($request["member_id"]) && isset($request["PLACEMENT"]) && $request["PLACEMENT"] == "CRM_DEAL_DETAIL_TAB") {
+    $domain = $request["DOMAIN"];
+    $member_id = $request["member_id"];
+    $placement_options = isset($request["PLACEMENT_OPTIONS"]) ? json_decode($request["PLACEMENT_OPTIONS"], true) : array();
+    $item_id = isset($placement_options["ID"]) ? $placement_options["ID"] : 0;
+} else {
+    die('Ошибка авторизации или неверное размещение');
+}
+?>
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Составление сметной документации</title>
+    <script src="//api.bitrix24.com/api/v1/"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <style>
+        .item-row { margin-bottom: 10px; }
+        .remove-item { cursor: pointer; color: red; }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <h1>Составление сметной документации</h1>
+        <div class="row">
+            <div class="col-md-12">
+                <form id="estimateForm">
+                    <div class="form-group">
+                        <label for="projectName">Название проекта</label>
+                        <input type="text" class="form-control" id="projectName" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Позиции сметы</label>
+                        <div id="itemsList">
+                            <div class="item-row">
+                                <div class="row">
+                                    <div class="col-md-4">
+                                        <input type="text" class="form-control item-name" placeholder="Наименование" required>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input type="number" class="form-control item-quantity" placeholder="Количество" required>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input type="number" class="form-control item-price" placeholder="Цена" required>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <span class="form-control-plaintext item-total">0</span>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <span class="remove-item">&times;</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-secondary mt-2" id="addItem">Добавить позицию</button>
+                    </div>
+                    <div class="form-group">
+                        <label>Итого: <span id="grandTotal">0</span> руб.</label>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Сохранить смету</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    BX24.init(function() {
+        console.log('Приложение инициализировано');
+        // Загрузка существующих данных
+        BX24.callMethod(
+            'crm.item.get',
+            {
+                entityTypeId: <?php echo isset($placement_options["ENTITY_TYPE_ID"]) ? $placement_options["ENTITY_TYPE_ID"] : 0 ?>,
+                id: <?php echo $item_id ?>
+            },
+            function(result) {
+                if(result.error()) {
+                    console.error('Ошибка при загрузке данных:', result.error());
+                    return;
+                }
+                
+                var item = result.data();
+                if(item && item.ESTIMATE_DATA) {
+                    try {
+                        var data = JSON.parse(item.ESTIMATE_DATA);
+                        $('#projectName').val(data.projectName);
+                        
+                        // Очищаем список позиций
+                        $('#itemsList').empty();
+                        
+                        // Добавляем сохраненные позиции
+                        data.items.forEach(function(item) {
+                            var newRow = $('<div class="item-row">' +
+                                '<div class="row">' +
+                                    '<div class="col-md-4"><input type="text" class="form-control item-name" placeholder="Наименование" required></div>' +
+                                    '<div class="col-md-2"><input type="number" class="form-control item-quantity" placeholder="Количество" required></div>' +
+                                    '<div class="col-md-2"><input type="number" class="form-control item-price" placeholder="Цена" required></div>' +
+                                    '<div class="col-md-2"><span class="form-control-plaintext item-total">0</span></div>' +
+                                    '<div class="col-md-2"><span class="remove-item">&times;</span></div>' +
+                                '</div>' +
+                            '</div>');
+                            
+                            newRow.find('.item-name').val(item.name);
+                            newRow.find('.item-quantity').val(item.quantity);
+                            newRow.find('.item-price').val(item.price);
+                            newRow.find('.item-total').text(item.total);
+                            
+                            $('#itemsList').append(newRow);
+                        });
+                        
+                        calculateTotals();
+                    } catch(e) {
+                        console.error('Ошибка при разборе данных сметы:', e);
+                    }
+                }
+            }
+        );
+    });
+
+    $(document).ready(function() {
+        // Добавление новой позиции
+        $('#addItem').click(function() {
+            var newRow = $('#itemsList .item-row:first').clone();
+            newRow.find('input').val('');
+            newRow.find('.item-total').text('0');
+            $('#itemsList').append(newRow);
+        });
+
+        // Удаление позиции
+        $(document).on('click', '.remove-item', function() {
+            if ($('#itemsList .item-row').length > 1) {
+                $(this).closest('.item-row').remove();
+                calculateTotals();
+            }
+        });
+
+        // Расчет при изменении значений
+        $(document).on('input', '.item-quantity, .item-price', function() {
+            calculateTotals();
+        });
+
+        // Расчет итоговой суммы
+        function calculateTotals() {
+            var grandTotal = 0;
+            
+            $('.item-row').each(function() {
+                var quantity = parseFloat($(this).find('.item-quantity').val()) || 0;
+                var price = parseFloat($(this).find('.item-price').val()) || 0;
+                var total = quantity * price;
+                
+                $(this).find('.item-total').text(total.toFixed(2));
+                grandTotal += total;
+            });
+            
+            $('#grandTotal').text(grandTotal.toFixed(2));
+        }
+
+        // Сохранение сметы
+        $('#estimateForm').submit(function(e) {
+            e.preventDefault();
+            
+            var items = [];
+            $('.item-row').each(function() {
+                items.push({
+                    name: $(this).find('.item-name').val(),
+                    quantity: $(this).find('.item-quantity').val(),
+                    price: $(this).find('.item-price').val(),
+                    total: $(this).find('.item-total').text()
+                });
+            });
+
+            var data = {
+                projectName: $('#projectName').val(),
+                items: items,
+                totalAmount: $('#grandTotal').text()
+            };
+
+            BX24.callMethod(
+                'crm.item.update',
+                {
+                    entityTypeId: <?php echo isset($placement_options["ENTITY_TYPE_ID"]) ? $placement_options["ENTITY_TYPE_ID"] : 0 ?>,
+                    id: <?php echo $item_id ?>,
+                    fields: {
+                        ESTIMATE_DATA: JSON.stringify(data)
+                    }
+                },
+                function(result) {
+                    if(result.error()) {
+                        alert('Ошибка при сохранении: ' + result.error());
+                    } else {
+                        alert('Смета успешно сохранена');
+                    }
+                }
+            );
+        });
+    });
+    </script>
+</body>
+</html>
